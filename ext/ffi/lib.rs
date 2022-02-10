@@ -29,6 +29,7 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::path::PathBuf;
 use std::ptr;
+use std::ptr::slice_from_raw_parts;
 use std::rc::Rc;
 
 pub struct Unstable(pub bool);
@@ -103,7 +104,7 @@ impl DynamicLibraryResource {
         .clone()
         .into_iter()
         .map(libffi::middle::Type::from),
-      foreign_fn.result.into(),
+      foreign_fn.result.clone().into(),
     );
 
     self.symbols.insert(
@@ -156,9 +157,15 @@ pub fn init<P: FfiPermissions + 'static>(unstable: bool) -> Extension {
     .build()
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
 enum NativeType {
+  Primitive(String),
+  Binary(Vec<String>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativePrimitiveType {
   Void,
   U8,
   I8,
@@ -175,23 +182,57 @@ enum NativeType {
   Pointer,
 }
 
+fn get_native_primitive_type(ty: &str) -> NativePrimitiveType {
+  match ty {
+    "void" => NativePrimitiveType::Void,
+    "u8" => NativePrimitiveType::U8,
+    "i8" => NativePrimitiveType::I8,
+    "u16" => NativePrimitiveType::U16,
+    "i16" => NativePrimitiveType::I16,
+    "u32" => NativePrimitiveType::U32,
+    "i32" => NativePrimitiveType::I32,
+    "u64" => NativePrimitiveType::U64,
+    "i64" => NativePrimitiveType::I64,
+    "usize" => NativePrimitiveType::USize,
+    "isize" => NativePrimitiveType::ISize,
+    "f32" => NativePrimitiveType::F32,
+    "f64" => NativePrimitiveType::F64,
+    "pointer" => NativePrimitiveType::Pointer,
+    _ => {
+      unreachable!()
+    }
+  }
+}
+
+fn get_ffi_type_from_literal(ty: &str) -> libffi::middle::Type {
+  match ty {
+    "void" => libffi::middle::Type::void(),
+    "u8" => libffi::middle::Type::u8(),
+    "i8" => libffi::middle::Type::i8(),
+    "u16" => libffi::middle::Type::u16(),
+    "i16" => libffi::middle::Type::i16(),
+    "u32" => libffi::middle::Type::u32(),
+    "i32" => libffi::middle::Type::i32(),
+    "u64" => libffi::middle::Type::u64(),
+    "i64" => libffi::middle::Type::i64(),
+    "usize" => libffi::middle::Type::usize(),
+    "isize" => libffi::middle::Type::isize(),
+    "f32" => libffi::middle::Type::f32(),
+    "f64" => libffi::middle::Type::f64(),
+    "pointer" => libffi::middle::Type::pointer(),
+    _ => {
+      unreachable!()
+    }
+  }
+}
+
 impl From<NativeType> for libffi::middle::Type {
   fn from(native_type: NativeType) -> Self {
     match native_type {
-      NativeType::Void => libffi::middle::Type::void(),
-      NativeType::U8 => libffi::middle::Type::u8(),
-      NativeType::I8 => libffi::middle::Type::i8(),
-      NativeType::U16 => libffi::middle::Type::u16(),
-      NativeType::I16 => libffi::middle::Type::i16(),
-      NativeType::U32 => libffi::middle::Type::u32(),
-      NativeType::I32 => libffi::middle::Type::i32(),
-      NativeType::U64 => libffi::middle::Type::u64(),
-      NativeType::I64 => libffi::middle::Type::i64(),
-      NativeType::USize => libffi::middle::Type::usize(),
-      NativeType::ISize => libffi::middle::Type::isize(),
-      NativeType::F32 => libffi::middle::Type::f32(),
-      NativeType::F64 => libffi::middle::Type::f64(),
-      NativeType::Pointer => libffi::middle::Type::pointer(),
+      NativeType::Primitive(ty) => get_ffi_type_from_literal(ty.as_str()),
+      NativeType::Binary(tys) => libffi::middle::Type::structure(
+        tys.iter().map(|it| get_ffi_type_from_literal(it.as_str())),
+      ),
     }
   }
 }
@@ -212,84 +253,100 @@ union NativeValue {
   f32_value: f32,
   f64_value: f64,
   pointer: *const u8,
+  binary: *const u8,
 }
 
 impl NativeValue {
   fn new(native_type: NativeType, value: Value) -> Result<Self, AnyError> {
-    let value = match native_type {
-      NativeType::Void => Self { void_value: () },
-      NativeType::U8 => Self {
-        u8_value: value_as_uint::<u8>(value)?,
-      },
-      NativeType::I8 => Self {
-        i8_value: value_as_int::<i8>(value)?,
-      },
-      NativeType::U16 => Self {
-        u16_value: value_as_uint::<u16>(value)?,
-      },
-      NativeType::I16 => Self {
-        i16_value: value_as_int::<i16>(value)?,
-      },
-      NativeType::U32 => Self {
-        u32_value: value_as_uint::<u32>(value)?,
-      },
-      NativeType::I32 => Self {
-        i32_value: value_as_int::<i32>(value)?,
-      },
-      NativeType::U64 => Self {
-        u64_value: value_as_uint::<u64>(value)?,
-      },
-      NativeType::I64 => Self {
-        i64_value: value_as_int::<i64>(value)?,
-      },
-      NativeType::USize => Self {
-        usize_value: value_as_uint::<usize>(value)?,
-      },
-      NativeType::ISize => Self {
-        isize_value: value_as_int::<isize>(value)?,
-      },
-      NativeType::F32 => Self {
-        f32_value: value_as_f32(value)?,
-      },
-      NativeType::F64 => Self {
-        f64_value: value_as_f64(value)?,
-      },
-      NativeType::Pointer => {
-        if value.is_null() {
-          Self {
-            pointer: ptr::null(),
-          }
-        } else {
-          Self {
-            pointer: u64::from(serde_json::from_value::<U32x2>(value)?)
-              as *const u8,
+    return Ok(match native_type {
+      NativeType::Primitive(ty) => {
+        match get_native_primitive_type(ty.as_str()) {
+          NativePrimitiveType::Void => Self { void_value: () },
+          NativePrimitiveType::U8 => Self {
+            u8_value: value_as_uint::<u8>(value)?,
+          },
+          NativePrimitiveType::I8 => Self {
+            i8_value: value_as_int::<i8>(value)?,
+          },
+          NativePrimitiveType::U16 => Self {
+            u16_value: value_as_uint::<u16>(value)?,
+          },
+          NativePrimitiveType::I16 => Self {
+            i16_value: value_as_int::<i16>(value)?,
+          },
+          NativePrimitiveType::U32 => Self {
+            u32_value: value_as_uint::<u32>(value)?,
+          },
+          NativePrimitiveType::I32 => Self {
+            i32_value: value_as_int::<i32>(value)?,
+          },
+          NativePrimitiveType::U64 => Self {
+            u64_value: value_as_uint::<u64>(value)?,
+          },
+          NativePrimitiveType::I64 => Self {
+            i64_value: value_as_int::<i64>(value)?,
+          },
+          NativePrimitiveType::USize => Self {
+            usize_value: value_as_uint::<usize>(value)?,
+          },
+          NativePrimitiveType::ISize => Self {
+            isize_value: value_as_int::<isize>(value)?,
+          },
+          NativePrimitiveType::F32 => Self {
+            f32_value: value_as_f32(value)?,
+          },
+          NativePrimitiveType::F64 => Self {
+            f64_value: value_as_f64(value)?,
+          },
+          NativePrimitiveType::Pointer => {
+            if value.is_null() {
+              Self {
+                pointer: ptr::null(),
+              }
+            } else {
+              Self {
+                pointer: u64::from(serde_json::from_value::<U32x2>(value)?)
+                  as *const u8,
+              }
+            }
           }
         }
       }
-    };
-    Ok(value)
+      NativeType::Binary(_) => {
+        Self::binary(serde_json::from_value::<Vec<u8>>(value)?.as_ptr())
+      }
+    });
   }
 
   fn buffer(ptr: *const u8) -> Self {
     Self { pointer: ptr }
   }
 
+  fn binary(encoded: *const u8) -> Self {
+    Self { binary: encoded }
+  }
+
   unsafe fn as_arg(&self, native_type: NativeType) -> Arg {
     match native_type {
-      NativeType::Void => Arg::new(&self.void_value),
-      NativeType::U8 => Arg::new(&self.u8_value),
-      NativeType::I8 => Arg::new(&self.i8_value),
-      NativeType::U16 => Arg::new(&self.u16_value),
-      NativeType::I16 => Arg::new(&self.i16_value),
-      NativeType::U32 => Arg::new(&self.u32_value),
-      NativeType::I32 => Arg::new(&self.i32_value),
-      NativeType::U64 => Arg::new(&self.u64_value),
-      NativeType::I64 => Arg::new(&self.i64_value),
-      NativeType::USize => Arg::new(&self.usize_value),
-      NativeType::ISize => Arg::new(&self.isize_value),
-      NativeType::F32 => Arg::new(&self.f32_value),
-      NativeType::F64 => Arg::new(&self.f64_value),
-      NativeType::Pointer => Arg::new(&self.pointer),
+      NativeType::Primitive(ty) => {
+        match get_native_primitive_type(ty.as_str()) {
+          NativePrimitiveType::Void => Arg::new(&self.void_value),
+          NativePrimitiveType::U8 => Arg::new(&self.u8_value),
+          NativePrimitiveType::I8 => Arg::new(&self.i8_value),
+          NativePrimitiveType::U16 => Arg::new(&self.u16_value),
+          NativePrimitiveType::I16 => Arg::new(&self.i16_value),
+          NativePrimitiveType::U32 => Arg::new(&self.u32_value),
+          NativePrimitiveType::I32 => Arg::new(&self.i32_value),
+          NativePrimitiveType::U64 => Arg::new(&self.u64_value),
+          NativePrimitiveType::I64 => Arg::new(&self.i64_value),
+          NativePrimitiveType::USize => Arg::new(&self.usize_value),
+          NativePrimitiveType::ISize => Arg::new(&self.isize_value),
+          NativePrimitiveType::F32 => Arg::new(&self.f32_value),
+          NativePrimitiveType::F64 => Arg::new(&self.f64_value),
+          NativePrimitiveType::Pointer => Arg::new(&self.pointer),
+        }
+      }
+      NativeType::Binary(_) => Arg::new(&self.binary),
     }
   }
 }
@@ -505,14 +562,14 @@ impl FfiCallPtrArgs {
         .clone()
         .into_iter()
         .map(libffi::middle::Type::from),
-      self.def.result.into(),
+      self.def.result.clone().into(),
     );
 
     Symbol {
       cif,
       ptr,
       parameter_types: self.def.parameters.clone(),
-      result_type: self.def.result,
+      result_type: self.def.result.clone(),
     }
   }
 }
@@ -526,13 +583,36 @@ fn ffi_call(args: FfiCallArgs, symbol: &Symbol) -> Result<Value, AnyError> {
 
   let mut native_values: Vec<NativeValue> = vec![];
 
-  for (&native_type, value) in symbol
+  for (native_type, value) in symbol
     .parameter_types
     .iter()
-    .zip(args.parameters.into_iter())
+    .zip(args.parameters.clone().into_iter())
   {
     match native_type {
-      NativeType::Pointer => match value.as_u64() {
+      NativeType::Primitive(ref ty) => {
+        match get_native_primitive_type(ty.as_str()) {
+          NativePrimitiveType::Pointer => match value.as_u64() {
+            Some(idx) => {
+              let buf = buffers
+                .get(idx as usize)
+                .ok_or_else(|| {
+                  generic_error(format!("No buffer present at index {}", idx))
+                })?
+                .unwrap();
+              native_values.push(NativeValue::buffer(buf.as_ptr()));
+            }
+            _ => {
+              let value = NativeValue::new(native_type.clone(), value)?;
+              native_values.push(value);
+            }
+          },
+          _ => {
+            let value = NativeValue::new(native_type.clone(), value)?;
+            native_values.push(value);
+          }
+        }
+      }
+      NativeType::Binary(_) => match value.as_u64() {
         Some(idx) => {
           let buf = buffers
             .get(idx as usize)
@@ -540,17 +620,14 @@ fn ffi_call(args: FfiCallArgs, symbol: &Symbol) -> Result<Value, AnyError> {
               generic_error(format!("No buffer present at index {}", idx))
             })?
             .unwrap();
-          native_values.push(NativeValue::buffer(buf.as_ptr()));
+          let value = NativeValue::binary(buf.as_ptr());
+          native_values.push(value)
         }
         _ => {
-          let value = NativeValue::new(native_type, value)?;
+          let value = NativeValue::new(native_type.clone(), value)?;
           native_values.push(value);
         }
       },
-      _ => {
-        let value = NativeValue::new(native_type, value)?;
-        native_values.push(value);
-      }
     }
   }
 
@@ -558,55 +635,63 @@ fn ffi_call(args: FfiCallArgs, symbol: &Symbol) -> Result<Value, AnyError> {
     .parameter_types
     .iter()
     .zip(native_values.iter())
-    .map(|(&native_type, native_value)| unsafe {
-      native_value.as_arg(native_type)
+    .map(|(native_type, native_value)| unsafe {
+      native_value.as_arg(native_type.clone())
     })
     .collect::<Vec<_>>();
 
-  Ok(match symbol.result_type {
-    NativeType::Void => {
-      json!(unsafe { symbol.cif.call::<()>(symbol.ptr, &call_args) })
-    }
-    NativeType::U8 => {
-      json!(unsafe { symbol.cif.call::<u8>(symbol.ptr, &call_args) })
-    }
-    NativeType::I8 => {
-      json!(unsafe { symbol.cif.call::<i8>(symbol.ptr, &call_args) })
-    }
-    NativeType::U16 => {
-      json!(unsafe { symbol.cif.call::<u16>(symbol.ptr, &call_args) })
-    }
-    NativeType::I16 => {
-      json!(unsafe { symbol.cif.call::<i16>(symbol.ptr, &call_args) })
-    }
-    NativeType::U32 => {
-      json!(unsafe { symbol.cif.call::<u32>(symbol.ptr, &call_args) })
-    }
-    NativeType::I32 => {
-      json!(unsafe { symbol.cif.call::<i32>(symbol.ptr, &call_args) })
-    }
-    NativeType::U64 => {
-      json!(unsafe { symbol.cif.call::<u64>(symbol.ptr, &call_args) })
-    }
-    NativeType::I64 => {
-      json!(unsafe { symbol.cif.call::<i64>(symbol.ptr, &call_args) })
-    }
-    NativeType::USize => {
-      json!(unsafe { symbol.cif.call::<usize>(symbol.ptr, &call_args) })
-    }
-    NativeType::ISize => {
-      json!(unsafe { symbol.cif.call::<isize>(symbol.ptr, &call_args) })
-    }
-    NativeType::F32 => {
-      json!(unsafe { symbol.cif.call::<f32>(symbol.ptr, &call_args) })
-    }
-    NativeType::F64 => {
-      json!(unsafe { symbol.cif.call::<f64>(symbol.ptr, &call_args) })
-    }
-    NativeType::Pointer => {
-      json!(U32x2::from(unsafe {
-        symbol.cif.call::<*const u8>(symbol.ptr, &call_args)
-      } as u64))
+  Ok(match &symbol.result_type {
+    NativeType::Primitive(ref ty) => match get_native_primitive_type(ty) {
+      NativePrimitiveType::Void => {
+        json!(unsafe { symbol.cif.call::<()>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::U8 => {
+        json!(unsafe { symbol.cif.call::<u8>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::I8 => {
+        json!(unsafe { symbol.cif.call::<i8>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::U16 => {
+        json!(unsafe { symbol.cif.call::<u16>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::I16 => {
+        json!(unsafe { symbol.cif.call::<i16>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::U32 => {
+        json!(unsafe { symbol.cif.call::<u32>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::I32 => {
+        json!(unsafe { symbol.cif.call::<i32>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::U64 => {
+        json!(unsafe { symbol.cif.call::<u64>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::I64 => {
+        json!(unsafe { symbol.cif.call::<i64>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::USize => {
+        json!(unsafe { symbol.cif.call::<usize>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::ISize => {
+        json!(unsafe { symbol.cif.call::<isize>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::F32 => {
+        json!(unsafe { symbol.cif.call::<f32>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::F64 => {
+        json!(unsafe { symbol.cif.call::<f64>(symbol.ptr, &call_args) })
+      }
+      NativePrimitiveType::Pointer => {
+        json!(U32x2::from(unsafe {
+          symbol.cif.call::<*const u8>(symbol.ptr, &call_args)
+        } as u64))
+      }
+    },
+    NativeType::Binary(rvty) => unsafe {
+      let value = symbol.cif.call::<*const u8>(symbol.ptr, &call_args);
+      let ty = libffi::middle::Type::structure(rvty.iter().map(|it| get_ffi_type_from_literal(it)));
+      let encoded = base64::encode(std::slice::from_raw_parts(value, (*ty.as_raw_ptr()).size));
+      json!(encoded)
     }
   })
 }

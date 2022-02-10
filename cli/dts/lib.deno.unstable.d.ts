@@ -146,7 +146,7 @@ declare namespace Deno {
   export function getUid(): number | null;
 
   /** All possible types for interfacing with foreign functions */
-  export type NativeType =
+  export type NativeTypePrimitive =
     | "void"
     | "u8"
     | "i8"
@@ -160,7 +160,11 @@ declare namespace Deno {
     | "isize"
     | "f32"
     | "f64"
-    | "pointer";
+    | "pointer"
+
+  export type NativeType =
+    |NativeTypePrimitive
+    |NativeTypePrimitive[]
 
   /** A foreign function as defined by its parameter and result types */
   export interface ForeignFunction<
